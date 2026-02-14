@@ -1,0 +1,21 @@
+{
+  "name": "tournoi-agilite-colisee",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "npm run dev:client",
+    "dev:client": "vite --host localhost --port 5174 --strictPort",
+    "dev:server": "node server/index.js",
+    "dev:all": "node scripts/dev-all.mjs",
+    "build": "vite build",
+    "preview": "vite preview --host"
+  },
+  "dependencies": {
+    "three": "^0.176.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "vite": "^6.1.0"
+  }
+}

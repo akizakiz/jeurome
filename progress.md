@@ -1,0 +1,176 @@
+Original prompt: Créer un jeu HTML/JS 3D “style Minecraft” dans le Colisée romain, pour 35 élèves, 2 équipes, tags (pas d’armes), boosts, zone rouge, fatigue/respawn 5s; hébergement Hostinger + Cloudflare; multijoueur WebSocket plus tard (après le design).
+
+## 2026-02-12
+- Scaffold Vite + Three.js, écran start, pointer lock, HUD minimal.
+- Hooks ajoutés: `window.render_game_to_text()` et `window.advanceTime(ms)` pour tests Playwright.
+- Colisée v1: arène elliptique, gradins, mur extérieur + arcades, portes, bannières, ciel + brouillard léger.
+- Ajustements: surfaces intérieures visibles (double side), spawn/pitch améliorés, pointer lock désactivé en contexte automation (tests).
+- Gameplay v0: bots visibles, tag au clic, énergie + regen, fatigue/respawn 5 s, score local (rouge vs bleu).
+- Gameplay v1: boosts (vitesse/bouclier/saut), zone rouge télégraphiée + dégâts + slow, HUD étendu.
+- Vérifications: build Vite OK (`npm run build`), captures Playwright (screenshots + state JSON).
+- Lisibilité spawn améliorée: bots plus petits, dummy déplacé hors axe caméra, espacement bots↔joueur + bot↔bot (anti-blocage visuel).
+- IA bots ajustée: vitesse un peu réduite, respawn bots plus loin du joueur.
+- Feedback tag enrichi via HUD message: trop loin / vise devant / cooldown / touché + énergie cible / tag réussi.
+- `render_game_to_text()` enrichi avec `hudMessage` pour assertions automation.
+- Vérifications ciblées Playwright:
+  - `output/web-game22`: spawn lisible sans bots collés devant la caméra.
+  - `output/web-game25-boost-pick`: pickup boost vitesse confirmé (`speedLeftSec` > 0 + message HUD).
+  - `output/web-game26-fatigue`: fatigue joueur + respawn 5 s confirmés (score bleu incrémenté).
+  - `output/web-game28-tag-score`: tag joueur répété -> fatigue bot + score rouge incrémenté.
+- Build final OK après ajustements (`npm run build`).
+- Lobby pré-match implémenté: nom joueur, choix équipe manuel, bots/durée configurables, validation des champs.
+- Persistance locale ajoutée (`localStorage`): `colisee.playerName`, `colisee.team`.
+- HUD enrichi avec `Joueur` + `Équipe`, score aligné sur l’équipe choisie (bots marquent pour l’équipe adverse).
+- Cycle de partie ajouté: `lobby -> playing -> postmatch`, résumé automatique à la fin du timer.
+- `render_game_to_text()` enrichi: `session`, `matchConfig`, `lastMatchSummary`.
+- Vérifications locales:
+  - `npm run build` OK.
+  - `output/web-game29-lobby`: état lobby confirmé.
+  - `output/web-game30-playing`: transition lobby -> match + HUD étendu confirmées.
+  - Playwright custom: validation nom bloquante, persistance nom/équipe, fin de match avec résumé, config bots/durée appliquée.
+
+### TODO next
+- Préparer structure réseau authoritaire (serveur Node + état tick) sans encore brancher Hostinger.
+- Introduire IDs d’entités stables + layer d’événements réseau (join/leave/state snapshot) pour brancher WebSocket.
+
+## 2026-02-13
+- Socle réseau autoritaire implémenté:
+  - `server/index.js`: serveur WebSocket (`ws`) tick 20 Hz, handshake `c_hello`, input `c_input`, ping/pong, broadcast `s_snapshot` + `s_event`.
+  - `server/sim.js`: simulation autoritaire (joueurs + bots + boosts + zone + score + fatigue/respawn + fin de match) et snapshots sérialisés.
+- Protocole partagé ajouté (`src/network/protocol.js`):
+  - constantes de version/message,
+  - limites lobby,
+  - sanitize/normalize réutilisables (nom, équipe, config match).
+- Client réseau ajouté (`src/network/client.js`) et branché dans `src/main.js`:
+  - connexion WebSocket locale (`ws://localhost:8787` par défaut),
+  - envoi des inputs du joueur au serveur,
+  - application des snapshots au state local,
+  - gestion d’événements serveur,
+  - fallback solo automatique si serveur absent/perdu.
+- UI/HUD:
+  - subtitle mise à jour (`index.html`) pour refléter le socle multijoueur local.
+  - `render_game_to_text()` enrichi avec bloc `network` + `remotePlayers`.
+- Scripts npm:
+  - `dev:server`, `dev:client`, `dev:all` (script `scripts/dev-all.mjs` pour lancer serveur + client ensemble).
+- Port client fixé pour stabilité: `dev:client` force `localhost:5174` avec `--strictPort` pour éviter les bascules de port (source de confusion 5173/5174).
+- Vérifications locales:
+  - `npm run build` OK.
+  - `node --check server/index.js` et `node --check server/sim.js` OK.
+  - smoke test WebSocket local OK (`s_welcome` + `s_snapshot` reçus).
+
+### TODO next
+- Afficher visuellement les autres joueurs réseau (meshes team red/blue) plutôt que seulement dans `render_game_to_text`.
+- Ajouter interpolation client-side (snapshots) pour adoucir le mouvement des entités distantes.
+- Préparer mode “room/lobby” multi-clients (attente prête/ready) avant auto-start du match.
+- Ajouter script Playwright de non-régression ciblé sur le flux réseau local.
+
+## 2026-02-14
+- Plan implémenté (itération majeure gameplay + réseau):
+  - Nouveau protocole `v2` (`src/network/protocol.js`) avec support des modes:
+    - `mode: ctf | dodgeball`
+    - `disabledSec` (10s),
+    - `ctfCapturesToWin`,
+    - `dodgeballScoreTarget`.
+  - Limites lobby mises à jour pour classe complète:
+    - bots `0..35`, défaut `0`.
+- Refonte complète de la simulation autoritaire (`server/sim.js`):
+  - états joueur: `active | disabled_spectator`,
+  - hors service = spectateur libre 10s puis retour auto,
+  - mode **Capture du drapeau**:
+    - pickup/drop/return/capture,
+    - score par captures (victoire au target),
+  - mode **Ballon prisonnier**:
+    - projectiles ballon autoritaires (throw/hit/despawn),
+    - score par touche valide,
+  - snapshots enrichis: `objectives`, `balls`, `world`, mode/config complète.
+- Client/lobby/HUD (`index.html`, `src/main.js`, `src/style.css`):
+  - sélecteur de mode en lobby,
+  - UI règles/contrôles alignées sur CTF + ballon prisonnier,
+  - HUD enrichi avec `Mode`,
+  - objectifs CTF et ballons synchronisés/affichés depuis snapshot,
+  - `render_game_to_text()` enrichi avec mode/objectifs/ballons.
+- Colisée agrandi (échelle plus grande et plus “réelle”) côté rendu client:
+  - dimensions globales augmentées,
+  - arcades/portes/bannières ajustées à la nouvelle échelle.
+- Vérifications:
+  - `node --check server/sim.js` OK,
+  - `node --check server/index.js` OK,
+  - `npm run build` OK,
+  - smoke WebSocket local OK pour les 2 modes (`ctf` + `dodgeball`) avec `matchConfig.mode` correct.
+- Itération suivante implémentée (room + rendu réseau):
+  - Flow room multi-clients avant match:
+    - nouveaux messages protocole `c_room_ready` / `s_room_state`,
+    - hôte assigné côté serveur,
+    - phase room: `ready_check -> countdown -> playing`,
+    - clients non hôtes peuvent rejoindre sans écraser la config room.
+  - UI lobby client:
+    - bouton `Je suis prêt` / `Annuler prêt`,
+    - état room (phase, nombre prêts, compte à rebours, statut hôte).
+  - Rendu réseau:
+    - joueurs distants visibles (mesh équipe + nametag),
+    - interpolation active des joueurs distants, ballons et drapeaux.
+  - `render_game_to_text()` corrigé pour exposer les coordonnées interpolées des joueurs distants.
+- Vérifications additionnelles:
+  - `node --check server/sim.js` OK,
+  - `node --check server/index.js` OK,
+  - `npm run build` OK,
+  - smoke room ready-check à 2 clients: phases observées `ready_check>countdown>playing`.
+- Opération classe locale (LAN):
+  - serveur lancé sur `:8787` + client Vite exposé sur réseau `:5174`,
+  - URL réseau validée HTTP 200,
+  - WebSocket LAN validé (`ws://<ip-hôte>:8787`),
+  - client configuré pour auto-cibler `ws://window.location.hostname:8787` (plus besoin de `?ws=...` sur le même LAN).
+- Itération dodgeball “ramasser puis lancer”:
+  - mode ballon prisonnier basculé en logique pickup:
+    - **10 ballons fluo au sol au départ**,
+    - capacité portage `1` ballon par joueur/bot (`hasBall`),
+    - tir impossible sans ballon (event `dry_throw`).
+  - règles d’impact:
+    - tir ennemi: mise hors service + score,
+    - tir allié: **passe** (transfert du ballon, pas de KO, pas de score).
+  - invariant partie:
+    - total ballons dans le jeu maintenu à `10` (sol + projectiles + portés),
+    - snapshots enrichis (`ball.kind`, `hasBall`, stats dodgeball: `ballCap/ground/projectile/carried/total`).
+  - rendu client:
+    - ballons fluo (matériaux emissive) + pulsation visuelle des ballons au sol,
+    - HUD dodgeball enrichi (`Ballon Oui/Non`, compteurs `Sol/Vol/Jeu`).
+  - UX texte:
+    - règles lobby mises à jour (10 ballons, ramassage requis, tir allié = passe).
+- Vérifications additionnelles:
+  - `node --check server/sim.js` OK,
+  - `node --check server/index.js` OK,
+  - `npm run build` OK,
+  - smoke test simulation: start dodgeball avec 10 ballons au sol + passe alliée validée (transfert sans score).
+- Itération graphique “fin d’après-midi doré” (sans post-processing):
+  - rendu global recalibré:
+    - `ACESFilmicToneMapping` + exposure contrôlée,
+    - ciel/brouillard chauds pour ambiance Colisée antique lisible.
+  - éclairage scène:
+    - soleil principal plus rasant et chaud,
+    - fill light froid léger pour relief et séparation volumes.
+  - matériaux Colisée:
+    - pierre/sable/podium/walkway retouchés (roughness/teinte/contraste),
+    - variations par gradins + détails de surface sable (anneaux subtils),
+    - bannières/portes harmonisées avec la nouvelle palette.
+  - gameplay readability conservée:
+    - couleurs équipes et objectifs conservées, avec légère harmonisation emissive.
+  - polish HUD/lobby:
+    - palette UI plus cohérente avec l’ambiance dorée,
+    - contraste et lisibilité améliorés (panel, pills, messages HUD, boutons).
+- Vérifications additionnelles:
+  - `npm run build` OK.
+- Itération graphique phase 2 (détails légers, perf-safe):
+  - Props ambiance ajoutés dans le Colisée:
+    - torches stylisées réparties autour de l’anneau,
+    - flammes emissives animées (flicker) + halo discret.
+  - Animation légère de décor:
+    - bannières avec oscillation subtile (sway),
+    - poussière atmosphérique volumétrique low-cost (`THREE.Points`).
+  - Boucle de rendu:
+    - update ambiance centralisé (`updateAmbience`) appelé à chaque frame,
+    - animation fluo des ballons au sol conservée.
+- Vérifications additionnelles:
+  - `npm run build` OK.
+
+### TODO next
+- Ajouter script Playwright E2E dédié aux modes CTF + dodgeball.

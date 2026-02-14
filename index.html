@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="fr-CA">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tournoi d’Agilité du Colisée</title>
+  </head>
+  <body>
+    <div id="ui">
+      <div id="panel">
+        <h1>Tournoi d’Agilité du Colisée</h1>
+        <p class="subtitle">Solo + socle multijoueur local (WebSocket autoritaire)</p>
+        <div class="rules">
+          <p><strong>Modes:</strong> Capture du drapeau ou Ballon prisonnier.</p>
+          <p><strong>Ballon prisonnier:</strong> 10 ballons fluo au sol au départ, il faut ramasser avant de lancer.</p>
+          <p><strong>Touché:</strong> spectateur libre 10 s, puis retour automatique.</p>
+          <p><strong>Tir allié:</strong> c’est une passe (pas d’élimination).</p>
+          <p><strong>Pas d’armes, pas de sang, pas de mort.</strong></p>
+        </div>
+        <div class="lobby">
+          <label class="field" for="player-name">
+            <span>Nom du joueur</span>
+            <input id="player-name" type="text" maxlength="20" autocomplete="nickname" placeholder="Ex: Élève 12" />
+          </label>
+          <div class="field">
+            <span>Équipe</span>
+            <div id="team-picker" class="team-picker">
+              <button class="team-btn" data-team="red" type="button">Rouge</button>
+              <button class="team-btn" data-team="blue" type="button">Bleu</button>
+            </div>
+          </div>
+          <div class="field-grid">
+            <label class="field" for="match-mode">
+              <span>Mode</span>
+              <select id="match-mode">
+                <option value="ctf">Capture du drapeau</option>
+                <option value="dodgeball">Ballon prisonnier</option>
+              </select>
+            </label>
+            <label class="field" for="bot-count">
+              <span>Bots (0–35)</span>
+              <input id="bot-count" type="number" min="0" max="35" step="1" value="0" />
+            </label>
+            <label class="field" for="match-duration">
+              <span>Durée (120–480s)</span>
+              <input id="match-duration" type="number" min="120" max="480" step="10" value="240" />
+            </label>
+          </div>
+        </div>
+        <div class="controls">
+          <div><kbd>WASD</kbd> bouger</div>
+          <div><kbd>Souris</kbd> regarder</div>
+          <div><kbd>Espace</kbd> sauter</div>
+          <div><kbd>Shift</kbd> sprint / descente spectateur</div>
+          <div><kbd>Clic</kbd> action (tag / lancer si ballon ramassé)</div>
+          <div><kbd>F</kbd> plein écran</div>
+          <div><kbd>Échap</kbd> libérer la souris</div>
+        </div>
+        <div class="room-actions">
+          <button id="ready-btn" type="button" class="ready-btn hidden">Je suis prêt</button>
+          <p id="room-state" class="room-state hidden" aria-live="polite"></p>
+        </div>
+        <button id="start-btn" type="button">Entrer dans le Colisée</button>
+        <p id="match-summary" class="match-summary hidden" aria-live="polite"></p>
+        <p id="status" class="status" aria-live="polite"></p>
+      </div>
+      <div id="hud" class="hidden">
+        <div id="hud-top">
+          <div class="pill">Joueur: <span id="hud-player">--</span></div>
+          <div class="pill">Équipe: <span id="hud-team">--</span></div>
+          <div class="pill">Énergie: <span id="hud-energy">100</span></div>
+          <div class="pill">Temps: <span id="hud-time">--:--</span></div>
+          <div class="pill">Mode: <span id="hud-mode">--</span></div>
+          <div class="pill">Score: <span id="hud-score">0 - 0</span></div>
+          <div class="pill">Objectif: <span id="hud-zone">--</span></div>
+          <div class="pill">Boosts: <span id="hud-boosts">Aucun</span></div>
+        </div>
+        <div id="crosshair">+</div>
+        <div id="hud-msg" class="hud-msg" aria-live="polite"></div>
+      </div>
+    </div>
+    <canvas id="game-canvas"></canvas>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
