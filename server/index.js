@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { createServer } from "node:http";
 import process from "node:process";
 import { WebSocketServer } from "ws";
 
@@ -18,14 +19,26 @@ import {
   tickServerState,
 } from "./sim.js";
 
-const PORT = Number.parseInt(process.env.PORT || "8787", 10);
+const parsedPort = Number.parseInt(process.env.PORT || "8787", 10);
+const PORT = Number.isFinite(parsedPort) ? parsedPort : 8787;
 const TICK_MS = Math.round(1000 / NETWORK_TICK_RATE);
 
 const state = createServerState();
 const socketsByPlayerId = new Map();
 const playerIdBySocket = new WeakMap();
 
-const wss = new WebSocketServer({ port: PORT });
+const server = createServer((req, res) => {
+  res.writeHead(200, { "content-type": "text/plain" });
+  res.end("ok");
+});
+
+const wss = new WebSocketServer({ server });
+
+server.listen(PORT, "0.0.0.0", () => {
+  const address = server.address();
+  const boundPort = typeof address === "object" && address ? address.port : PORT;
+  console.log(`[server] WebSocket autoritaire prêt sur ws://0.0.0.0:${boundPort}`);
+});
 
 function safeJsonParse(raw) {
   try {
@@ -216,10 +229,14 @@ function shutdown() {
       // ignore close errors
     }
   }
-  wss.close(() => process.exit(0));
+  wss.close(() => {
+    try {
+      server.close(() => process.exit(0));
+    } catch {
+      process.exit(0);
+    }
+  });
 }
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
-
-console.log(`[server] WebSocket autoritaire prêt sur ws://localhost:${PORT}`);
