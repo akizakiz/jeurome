@@ -7,7 +7,7 @@ import {
   normalizeTeam,
   sanitizePlayerName,
 } from "./network/protocol.js";
-import { cmdInput, cmdJoinRoom } from "./net/protocol.js";
+import { cmdInput } from "./net/protocol.js";
 import { applySnapshot } from "./net/snapshotApplier.js";
 import { createNetworkState, initNetwork, setNetworkStatus, setRoomFlags, setSnapshotMetrics } from "./state/networkState.js";
 
@@ -51,6 +51,9 @@ const MODE_LABELS = {
   [MATCH_MODES.dodgeball]: "Ballon prisonnier",
 };
 const NET_HUD_REFRESH_MS = 150;
+const AUTO_START_WATCHDOG_INTERVAL_MS = 2000;
+const AUTO_START_WATCHDOG_TIMEOUT_MS = 10000;
+const AUTO_START_WATCHDOG_MAX_ATTEMPTS = 3;
 
 const PLAYER_SPAWN = {
   x: 0,
@@ -178,6 +181,10 @@ const input = {
 const netHudUi = createNetHudOverlay();
 let netHudTimer = null;
 let inputSenderTimer = null;
+let autoStartWatchdogTimer = null;
+let autoStartRequestedAtMs = 0;
+let autoStartAttempts = 0;
+let autoStartBlocked = false;
 let lastSentInputSnapshot = null;
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -798,7 +805,7 @@ function createNetHudOverlay() {
     <div class="net-hud-debug" data-role="telemetry">typesSeen: -- · counts: --</div>
     <div class="net-hud-actions">
       <button type="button" data-role="join-btn">Join</button>
-      <button type="button" data-role="ready-btn">Ready: OFF</button>
+      <button type="button" data-role="ready-btn" class="hidden">Ready: OFF</button>
     </div>
   `;
   document.body.append(root);
@@ -819,13 +826,6 @@ function createNetHudOverlay() {
   ui.joinBtn?.addEventListener("click", onNetHudJoinClick);
   ui.readyBtn?.addEventListener("click", onNetHudReadyClick);
   return ui;
-}
-
-function sendNetworkCommand(command) {
-  if (!command || typeof command.type !== "string") return false;
-  const transport = STATE.network.transport;
-  if (!transport || typeof transport.send !== "function") return false;
-  return transport.send(command.type, command.payload || {});
 }
 
 function getCurrentReadyState(roomState = null) {
@@ -895,8 +895,11 @@ function updateNetHudOverlay() {
   }
   if (netHudUi.joinBtn) {
     const canJoin = connected && !STATE.network.joinedRoom;
-    netHudUi.joinBtn.classList.toggle("hidden", !canJoin);
-    netHudUi.joinBtn.disabled = !canJoin;
+    const canForceStart = connected && STATE.network.joinedRoom && autoStartBlocked && phase !== "playing";
+    const visible = canJoin || canForceStart;
+    netHudUi.joinBtn.classList.toggle("hidden", !visible);
+    netHudUi.joinBtn.disabled = !visible;
+    netHudUi.joinBtn.textContent = canForceStart ? "Démarrer" : "Join";
   }
 }
 
@@ -920,31 +923,84 @@ function onNetHudJoinClick() {
   saveSessionToStorage();
   updateLobbyForm();
 
-  const joinCmd = cmdJoinRoom({
-    name: parsed.data.playerName,
-    team: parsed.data.team,
-    matchConfig: {
-      mode: parsed.data.mode,
-      botCount: parsed.data.botCount,
-      durationSec: parsed.data.durationSec,
-      ctfCapturesToWin: STATE.matchConfig.ctfCapturesToWin,
-      dodgeballScoreTarget: STATE.matchConfig.dodgeballScoreTarget,
-      disabledSec: STATE.matchConfig.disabledSec,
-    },
-    requestStart: false,
-  });
-
-  const sent = sendNetworkCommand(joinCmd);
-  if (!sent) {
+  if (!requestNetworkMatch(parsed.data, { restartWatchdog: true, statusMessage: "Connexion à la room en cours…" })) {
     setStatus("Impossible d'envoyer Join.");
     return;
   }
-
-  setStatus("Join envoyé.");
 }
 
 function onNetHudReadyClick() {
   // Ready is intentionally disabled: the match starts automatically once joined.
+}
+
+function clearAutoStartWatchdog({ keepBlocked = false } = {}) {
+  if (autoStartWatchdogTimer) {
+    window.clearInterval(autoStartWatchdogTimer);
+    autoStartWatchdogTimer = null;
+  }
+  autoStartRequestedAtMs = 0;
+  autoStartAttempts = 0;
+  if (!keepBlocked) autoStartBlocked = false;
+}
+
+function buildCurrentNetworkSettings() {
+  const safeName = sanitizePlayerName(STATE.session.playerName || playerNameInput?.value || "");
+  return {
+    playerName: safeName,
+    team: normalizeTeam(STATE.session.team),
+    mode: normalizeMatchMode(STATE.matchConfig.mode),
+    botCount: clampInt(STATE.matchConfig.botCount, MATCH_LIMITS.botMin, MATCH_LIMITS.botMax, MATCH_LIMITS.defaultBotCount),
+    durationSec: clampInt(
+      STATE.matchConfig.durationSec,
+      MATCH_LIMITS.durationMin,
+      MATCH_LIMITS.durationMax,
+      MATCH_LIMITS.defaultDurationSec,
+    ),
+  };
+}
+
+function startAutoStartWatchdog() {
+  clearAutoStartWatchdog();
+  autoStartRequestedAtMs = Date.now();
+
+  autoStartWatchdogTimer = window.setInterval(() => {
+    if (!isNetworkOnline()) {
+      clearAutoStartWatchdog();
+      return;
+    }
+
+    if (!STATE.network.joinedRoom) return;
+
+    const phase = String(STATE.room.phase || "");
+    if (phase === "playing" || STATE.mode === "playing") {
+      clearAutoStartWatchdog();
+      return;
+    }
+
+    if (phase !== "ready_check" && phase !== "countdown") return;
+
+    const elapsed = Date.now() - autoStartRequestedAtMs;
+    if (elapsed < AUTO_START_WATCHDOG_INTERVAL_MS) return;
+
+    if (elapsed > AUTO_START_WATCHDOG_TIMEOUT_MS || autoStartAttempts >= AUTO_START_WATCHDOG_MAX_ATTEMPTS) {
+      autoStartBlocked = true;
+      setStatus("Room connectée mais démarrage bloqué côté serveur.");
+      clearAutoStartWatchdog({ keepBlocked: true });
+      updateNetHudOverlay();
+      return;
+    }
+
+    autoStartAttempts += 1;
+    const settings = buildCurrentNetworkSettings();
+    if (settings.playerName.length < MATCH_LIMITS.nameMin) {
+      setStatus(`Nom requis (${MATCH_LIMITS.nameMin}-${MATCH_LIMITS.nameMax} caractères).`);
+      return;
+    }
+    requestNetworkMatch(settings, {
+      restartWatchdog: false,
+      statusMessage: "Room connectée, tentative de démarrage…",
+    });
+  }, AUTO_START_WATCHDOG_INTERVAL_MS);
 }
 
 function startNetHudLoop() {
@@ -1099,6 +1155,7 @@ function isNetworkOnline() {
 function applyPlayingUiState() {
   uiPanel.style.display = "none";
   hudEl.classList.remove("hidden");
+  clearAutoStartWatchdog();
 }
 
 function syncBoostsFromSnapshot(snapshotBoosts) {
@@ -1471,12 +1528,13 @@ function initNetworkClient() {
             STATE.matchConfig.botCount = parsed.data.botCount;
             STATE.matchConfig.durationSec = parsed.data.durationSec;
             saveSessionToStorage();
-            requestNetworkMatch(parsed.data);
+            requestNetworkMatch(parsed.data, { restartWatchdog: true, statusMessage: "Connexion à la room en cours…" });
           } else {
             setStatus(parsed.message);
           }
         }
       } else if (STATE.network.useOnlineMode) {
+        clearAutoStartWatchdog();
         setRoomFlags(STATE.network, { joinedRoom: false, isReady: false });
         if (STATE.mode === "playing") {
           clearArenaEntities();
@@ -1493,6 +1551,7 @@ function initNetworkClient() {
       STATE.network.playerId = payload.playerId || STATE.network.playerId;
       STATE.network.startedViaNetwork = true;
       setRoomFlags(STATE.network, { joinedRoom: true });
+      setStatus("Connecté à la room.");
       if (payload.assignedSession?.playerName) STATE.session.playerName = payload.assignedSession.playerName;
       if (payload.assignedSession?.team) STATE.session.team = normalizeTeam(payload.assignedSession.team);
       if (payload.matchConfig) {
@@ -1525,6 +1584,7 @@ function initNetworkClient() {
       }
       updateLobbyForm();
       updateRoomUi();
+      updateNetHudOverlay();
     },
     onRoomState: (payload) => {
       applyRoomState(payload);
@@ -1541,11 +1601,12 @@ function initNetworkClient() {
   STATE.network.liveNetworkState = NetworkState;
 }
 
-function requestNetworkMatch(settings) {
+function requestNetworkMatch(settings, { restartWatchdog = true, statusMessage = "Connexion à la room en cours…" } = {}) {
   if (!STATE.network.transport || !isNetworkOnline()) {
     return false;
   }
 
+  autoStartBlocked = false;
   STATE.network.transport.sendHello({
     name: settings.playerName,
     team: settings.team,
@@ -1557,10 +1618,11 @@ function requestNetworkMatch(settings) {
       dodgeballScoreTarget: STATE.matchConfig.dodgeballScoreTarget,
       disabledSec: STATE.matchConfig.disabledSec,
     },
-    requestStart: false,
+    requestStart: true,
   });
+  if (restartWatchdog) startAutoStartWatchdog();
   STATE.network.startedViaNetwork = true;
-  setStatus("Connexion à la room en cours…");
+  setStatus(statusMessage);
   return true;
 }
 
@@ -1890,6 +1952,7 @@ window.addEventListener("beforeunload", () => {
     window.clearInterval(netHudTimer);
     netHudTimer = null;
   }
+  clearAutoStartWatchdog();
   stopInputSender();
 });
 
