@@ -1,6 +1,6 @@
 export const PROTOCOL_VERSION = 2;
 
-export const NETWORK_DEFAULT_URL = "ws://localhost:8787";
+export const NETWORK_DEFAULT_URL = "module5-romeballon3";
 export const NETWORK_TICK_RATE = 20;
 export const MAX_INPUT_DT_MS = 100;
 

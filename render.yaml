@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: jeurome-relay
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: SESSION_SECRET
+        sync: false
+      - key: LS_SECRET_KEY
+        sync: false
+      - key: LS_CLUSTER
+        value: eu1
+      - key: CORS_ORIGIN
+        sync: false
+      - key: SESSION_TTL
+        value: 12h
+      - key: SESSION_IDLE_TIMEOUT_MS
+        value: 45000
+      - key: TICK_RATE
+        value: 20
+
+  - type: static
+    name: jeurome-web
+    plan: free
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_BACKEND_URL
+        fromService:
+          type: web
+          name: jeurome-relay
+          property: host
+      - key: VITE_LS_PUBLIC_KEY
+        sync: false
+      - key: VITE_LS_WS_ENDPOINT
+        value: eu1.lattestream.com
+      - key: VITE_LS_ROOM_ID
+        value: module5-romeballon3

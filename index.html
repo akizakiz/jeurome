@@ -9,7 +9,7 @@
     <div id="ui">
       <div id="panel">
         <h1>Tournoi d’Agilité du Colisée</h1>
-        <p class="subtitle">Solo + socle multijoueur local (WebSocket autoritaire)</p>
+        <p class="subtitle">Solo + multijoueur temps réel (LatteStream)</p>
         <div class="rules">
           <p><strong>Modes:</strong> Capture du drapeau ou Ballon prisonnier.</p>
           <p><strong>Ballon prisonnier:</strong> 10 ballons fluo au sol au départ, il faut ramasser avant de lancer.</p>
@@ -78,6 +78,7 @@
         <div id="crosshair">+</div>
         <div id="hud-msg" class="hud-msg" aria-live="polite"></div>
       </div>
+      <p id="net-debug" class="net-debug" aria-live="polite"></p>
     </div>
     <canvas id="game-canvas"></canvas>
     <script type="module" src="/src/main.js"></script>

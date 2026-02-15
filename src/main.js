@@ -1,14 +1,15 @@
 import "./style.css";
 import * as THREE from "three";
-import { GameClientTransport } from "./network/client.js";
 import {
   MATCH_LIMITS,
   MATCH_MODES,
-  NETWORK_DEFAULT_URL,
   normalizeMatchMode,
   normalizeTeam,
   sanitizePlayerName,
 } from "./network/protocol.js";
+import { cmdInput, cmdJoinRoom, cmdSetReady } from "./net/protocol.js";
+import { applySnapshot } from "./net/snapshotApplier.js";
+import { createNetworkState, initNetwork, setNetworkStatus, setRoomFlags, setSnapshotMetrics } from "./state/networkState.js";
 
 const uiPanel = document.querySelector("#panel");
 const startBtn = document.querySelector("#start-btn");
@@ -31,6 +32,7 @@ const hudScoreEl = document.querySelector("#hud-score");
 const hudZoneEl = document.querySelector("#hud-zone");
 const hudBoostsEl = document.querySelector("#hud-boosts");
 const hudMsgEl = document.querySelector("#hud-msg");
+const netDebugEl = document.querySelector("#net-debug");
 const canvas = document.querySelector("#game-canvas");
 
 const STORAGE_KEYS = {
@@ -38,11 +40,6 @@ const STORAGE_KEYS = {
   team: "colisee.team",
   mode: "colisee.mode",
 };
-
-const SEARCH = new URLSearchParams(window.location.search);
-const NETWORK_QUERY_URL = SEARCH.get("ws");
-const NETWORK_AUTO_URL = `ws://${window.location.hostname || "localhost"}:8787`;
-const FORCE_OFFLINE = SEARCH.get("offline") === "1";
 
 const TEAM_LABELS = {
   red: "Rouge",
@@ -53,6 +50,7 @@ const MODE_LABELS = {
   [MATCH_MODES.ctf]: "Capture du drapeau",
   [MATCH_MODES.dodgeball]: "Ballon prisonnier",
 };
+const NET_HUD_REFRESH_MS = 150;
 
 const PLAYER_SPAWN = {
   x: 0,
@@ -131,21 +129,7 @@ const STATE = {
     countdownLeftSec: 0,
     players: [],
   },
-  network: {
-    useOnlineMode: !FORCE_OFFLINE,
-    status: "offline", // offline | connecting | online
-    serverUrl: NETWORK_QUERY_URL || NETWORK_AUTO_URL || NETWORK_DEFAULT_URL,
-    transport: null,
-    playerId: null,
-    inputSeq: 0,
-    serverTick: 0,
-    snapshotAgeMs: null,
-    rttMs: null,
-    lastNetworkError: "",
-    startedViaNetwork: false,
-    joinedRoom: false,
-    isReady: false,
-  },
+  network: createNetworkState(),
 };
 
 const CONSTANTS = {
@@ -190,6 +174,11 @@ const input = {
   sprint: false,
   tagQueued: false,
 };
+
+const netHudUi = createNetHudOverlay();
+let netHudTimer = null;
+let inputSenderTimer = null;
+let lastSentInputSnapshot = null;
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -765,8 +754,19 @@ function formatRoomPhaseLabel(phase) {
   return "Lobby";
 }
 
+function updateNetworkDebugUi() {
+  if (!netDebugEl) return;
+  const net = STATE.network;
+  const mode = net.useOnlineMode ? "online" : "offline";
+  const rtt = Number.isFinite(net.rttMs) ? `${Math.round(net.rttMs)}ms` : "--";
+  const snapAge = Number.isFinite(net.snapshotAgeMs) ? `${Math.round(net.snapshotAgeMs)}ms` : "--";
+  netDebugEl.textContent = `Réseau: ${mode}/${net.status} · RTT ${rtt} · Snap ${snapAge} · Tick ${net.serverTick}`;
+  netDebugEl.title = net.serverUrl ? `Serveur: ${net.serverUrl}` : "";
+}
+
 function updateRoomUi() {
   const isOnline = STATE.network.useOnlineMode && STATE.network.status === "online";
+  updateNetworkDebugUi();
   if (!readyBtn || !roomStateEl) return;
 
   readyBtn.classList.toggle("hidden", !isOnline || !STATE.network.joinedRoom);
@@ -783,6 +783,190 @@ function updateRoomUi() {
   const base = `${phaseLabel} · ${STATE.room.readyCount}/${STATE.room.totalPlayers} prêts`;
   const host = STATE.room.hostPlayerId === STATE.network.playerId ? " · Hôte" : "";
   roomStateEl.textContent = `${base}${countdown}${host}`;
+}
+
+function createNetHudOverlay() {
+  const root = document.createElement("div");
+  root.id = "net-hud";
+  root.innerHTML = `
+    <div class="net-hud-row">
+      <span class="net-hud-badge" data-role="badge">DÉCONNECTÉ</span>
+      <span>phase: <strong data-role="phase">--</strong></span>
+    </div>
+    <div class="net-hud-row">
+      <span>players: <strong data-role="total-players">0</strong></span>
+      <span>ready: <strong data-role="ready-count">0</strong></span>
+      <span>host: <strong data-role="host-player-id">--</strong></span>
+      <span>tick: <strong data-role="last-tick">--</strong></span>
+    </div>
+    <div class="net-hud-debug" data-role="telemetry">typesSeen: -- · counts: --</div>
+    <div class="net-hud-actions">
+      <button type="button" data-role="join-btn">Join</button>
+      <button type="button" data-role="ready-btn">Ready: OFF</button>
+    </div>
+  `;
+  document.body.append(root);
+
+  const ui = {
+    root,
+    badge: root.querySelector('[data-role="badge"]'),
+    phase: root.querySelector('[data-role="phase"]'),
+    totalPlayers: root.querySelector('[data-role="total-players"]'),
+    readyCount: root.querySelector('[data-role="ready-count"]'),
+    hostPlayerId: root.querySelector('[data-role="host-player-id"]'),
+    lastTick: root.querySelector('[data-role="last-tick"]'),
+    telemetry: root.querySelector('[data-role="telemetry"]'),
+    joinBtn: root.querySelector('[data-role="join-btn"]'),
+    readyBtn: root.querySelector('[data-role="ready-btn"]'),
+  };
+
+  ui.joinBtn?.addEventListener("click", onNetHudJoinClick);
+  ui.readyBtn?.addEventListener("click", onNetHudReadyClick);
+  return ui;
+}
+
+function sendNetworkCommand(command) {
+  if (!command || typeof command.type !== "string") return false;
+  const transport = STATE.network.transport;
+  if (!transport || typeof transport.send !== "function") return false;
+  return transport.send(command.type, command.payload || {});
+}
+
+function getCurrentReadyState(roomState = null) {
+  const source = roomState || STATE.network.liveNetworkState?.roomState;
+  if (source && Array.isArray(source.players) && STATE.network.playerId) {
+    const me = source.players.find((entry) => entry.id === STATE.network.playerId);
+    if (me) return !!me.ready;
+  }
+  return !!STATE.network.isReady;
+}
+
+function summarizeTelemetry(telemetry) {
+  const typesSeen = Array.isArray(telemetry?.typesSeen) ? telemetry.typesSeen : [];
+  const countsEntries = Object.entries(telemetry?.counts || {})
+    .filter(([, value]) => Number.isFinite(value) && value > 0)
+    .sort((a, b) => b[1] - a[1]);
+  const sentEntries = Object.entries(telemetry?.sentCounts || {})
+    .filter(([, value]) => Number.isFinite(value) && value > 0)
+    .sort((a, b) => b[1] - a[1]);
+
+  const typesPreview = typesSeen.slice(0, 4).join(",");
+  const typesSuffix = typesSeen.length > 4 ? ",…" : "";
+  const countsPreview = countsEntries
+    .slice(0, 4)
+    .map(([type, count]) => `${type}:${count}`)
+    .join(" ");
+  const sentPreview = sentEntries
+    .slice(0, 4)
+    .map(([type, count]) => `${type}:${count}`)
+    .join(" ");
+
+  return {
+    typesText: typesPreview ? `${typesPreview}${typesSuffix}` : "--",
+    countsText: countsPreview || "--",
+    sentText: sentPreview || "--",
+  };
+}
+
+function updateNetHudOverlay() {
+  if (!netHudUi) return;
+  const live = STATE.network.liveNetworkState || {};
+  const roomState = live.roomState || null;
+  const connected = !!live.connected;
+  const phase = roomState?.phase || "--";
+  const totalPlayers = Number.isFinite(roomState?.totalPlayers) ? roomState.totalPlayers : 0;
+  const readyCount = Number.isFinite(roomState?.readyCount) ? roomState.readyCount : 0;
+  const hostPlayerId = roomState?.hostPlayerId || "--";
+  const lastTick = live.lastServerTick ?? "--";
+  const readyState = getCurrentReadyState(roomState);
+  const telemetry = live.telemetry || STATE.network.transport?.getTelemetry?.() || null;
+  const { typesText, countsText, sentText } = summarizeTelemetry(telemetry);
+
+  if (netHudUi.badge) {
+    netHudUi.badge.textContent = connected ? "CONNECTÉ" : "DÉCONNECTÉ";
+    netHudUi.badge.classList.toggle("connected", connected);
+  }
+  if (netHudUi.phase) netHudUi.phase.textContent = String(phase);
+  if (netHudUi.totalPlayers) netHudUi.totalPlayers.textContent = String(totalPlayers);
+  if (netHudUi.readyCount) netHudUi.readyCount.textContent = String(readyCount);
+  if (netHudUi.hostPlayerId) netHudUi.hostPlayerId.textContent = String(hostPlayerId);
+  if (netHudUi.lastTick) netHudUi.lastTick.textContent = String(lastTick);
+  if (netHudUi.telemetry) netHudUi.telemetry.textContent = `typesSeen: ${typesText} · counts: ${countsText} · sent: ${sentText}`;
+  if (netHudUi.readyBtn) {
+    netHudUi.readyBtn.textContent = readyState ? "Ready: ON" : "Ready: OFF";
+    netHudUi.readyBtn.disabled = !connected || !STATE.network.joinedRoom;
+  }
+  if (netHudUi.joinBtn) {
+    netHudUi.joinBtn.disabled = !connected;
+  }
+}
+
+function onNetHudJoinClick() {
+  if (!isNetworkOnline()) {
+    setStatus("Serveur non connecté.");
+    return;
+  }
+
+  const parsed = parseLobbySettings();
+  if (!parsed.ok) {
+    setStatus(parsed.message);
+    return;
+  }
+
+  STATE.session.playerName = parsed.data.playerName;
+  STATE.session.team = parsed.data.team;
+  STATE.matchConfig.mode = parsed.data.mode;
+  STATE.matchConfig.botCount = parsed.data.botCount;
+  STATE.matchConfig.durationSec = parsed.data.durationSec;
+  saveSessionToStorage();
+  updateLobbyForm();
+
+  const joinCmd = cmdJoinRoom({
+    name: parsed.data.playerName,
+    team: parsed.data.team,
+    matchConfig: {
+      mode: parsed.data.mode,
+      botCount: parsed.data.botCount,
+      durationSec: parsed.data.durationSec,
+      ctfCapturesToWin: STATE.matchConfig.ctfCapturesToWin,
+      dodgeballScoreTarget: STATE.matchConfig.dodgeballScoreTarget,
+      disabledSec: STATE.matchConfig.disabledSec,
+    },
+    requestStart: false,
+  });
+
+  const sent = sendNetworkCommand(joinCmd);
+  if (!sent) {
+    setStatus("Impossible d'envoyer Join.");
+    return;
+  }
+
+  setStatus("Join envoyé.");
+}
+
+function onNetHudReadyClick() {
+  if (!isNetworkOnline()) {
+    setStatus("Serveur non connecté.");
+    return;
+  }
+  if (!STATE.network.transport || !STATE.network.joinedRoom) return;
+
+  const nextReady = !getCurrentReadyState();
+  const sent = sendNetworkCommand(cmdSetReady(nextReady));
+  if (!sent) {
+    setStatus("Impossible d'envoyer Ready.");
+    return;
+  }
+
+  STATE.network.isReady = nextReady;
+  updateRoomUi();
+  updateNetHudOverlay();
+}
+
+function startNetHudLoop() {
+  if (netHudTimer) window.clearInterval(netHudTimer);
+  updateNetHudOverlay();
+  netHudTimer = window.setInterval(updateNetHudOverlay, NET_HUD_REFRESH_MS);
 }
 
 function makeNameLabelSprite(name, team) {
@@ -1108,9 +1292,7 @@ function syncObjectivesFromSnapshot(objectives) {
 
 function applyServerSnapshot(snapshot) {
   if (!snapshot || typeof snapshot !== "object") return;
-  STATE.network.serverTick = Number(snapshot.serverTick || 0);
-  STATE.network.snapshotAgeMs = STATE.network.transport?.getSnapshotAgeMs() ?? null;
-  STATE.network.rttMs = STATE.network.transport?.rttMs ?? null;
+  setSnapshotMetrics(STATE.network, STATE.network.transport, Number(snapshot.serverTick || 0));
 
   STATE.timeLeftSec = Number(snapshot.timeLeftSec ?? STATE.timeLeftSec);
   STATE.nowSec = Number(snapshot.nowSec ?? STATE.nowSec);
@@ -1279,32 +1461,32 @@ function applyRoomState(payload) {
   }
 
   const me = STATE.room.players.find((entry) => entry.id === STATE.network.playerId);
-  STATE.network.isReady = !!me?.ready;
+  setRoomFlags(STATE.network, { isReady: !!me?.ready });
   updateRoomUi();
 }
 
 function initNetworkClient() {
   if (!STATE.network.useOnlineMode) return;
 
-  const transport = new GameClientTransport({
+  const { wsClient, NetworkState } = initNetwork({
     url: STATE.network.serverUrl,
+    debug: STATE.network.debug,
     onStatus: (status) => {
-      STATE.network.status = status;
+      setNetworkStatus(STATE.network, status);
       if (status === "connecting") {
-        setStatus("Connexion au serveur local…");
+        setStatus("Connexion au réseau LatteStream…");
       } else if (status === "online") {
         STATE.network.lastNetworkError = "";
-        setStatus("Serveur connecté. Entre dans la room puis mets-toi prêt.");
+        setStatus("Réseau connecté. Entre dans la room puis mets-toi prêt.");
       } else if (STATE.network.useOnlineMode) {
-        STATE.network.joinedRoom = false;
-        STATE.network.isReady = false;
+        setRoomFlags(STATE.network, { joinedRoom: false, isReady: false });
         if (STATE.mode === "playing") {
           clearArenaEntities();
           resetInputState();
           enterLobbyMode(false);
           setStatus("Connexion perdue. Retour au lobby local.");
         } else {
-          setStatus("Serveur introuvable, mode solo local disponible.");
+          setStatus("Réseau indisponible, mode solo local disponible.");
         }
       }
       updateRoomUi();
@@ -1312,7 +1494,7 @@ function initNetworkClient() {
     onWelcome: (payload) => {
       STATE.network.playerId = payload.playerId || STATE.network.playerId;
       STATE.network.startedViaNetwork = true;
-      STATE.network.joinedRoom = true;
+      setRoomFlags(STATE.network, { joinedRoom: true });
       if (payload.assignedSession?.playerName) STATE.session.playerName = payload.assignedSession.playerName;
       if (payload.assignedSession?.team) STATE.session.team = normalizeTeam(payload.assignedSession.team);
       if (payload.matchConfig) {
@@ -1357,8 +1539,8 @@ function initNetworkClient() {
     },
   });
 
-  STATE.network.transport = transport;
-  transport.connect();
+  STATE.network.transport = wsClient;
+  STATE.network.liveNetworkState = NetworkState;
 }
 
 function requestNetworkMatch(settings) {
@@ -1384,34 +1566,96 @@ function requestNetworkMatch(settings) {
   return true;
 }
 
-function updateNetworkInput(dt) {
-  if (!isNetworkOnline() || STATE.mode !== "playing") return;
-  const transport = STATE.network.transport;
-  if (!transport) return;
-  const actionQueued = input.tagQueued;
-  const isDodgeball = STATE.matchConfig.mode === MATCH_MODES.dodgeball;
+function buildNetworkInputState() {
+  return {
+    left: !!input.left,
+    right: !!input.right,
+    up: !!input.forward,
+    down: !!input.back,
+    action: !!input.jumpQueued,
+  };
+}
 
+function buildInputSnapshot(inputState) {
+  return {
+    left: inputState.left,
+    right: inputState.right,
+    up: inputState.up,
+    down: inputState.down,
+    action: inputState.action,
+    sprint: !!input.sprint,
+    tagQueued: !!input.tagQueued,
+    yaw: STATE.player.yaw,
+    pitch: STATE.player.pitch,
+  };
+}
+
+function hasInputSnapshotChanged(current, previous) {
+  if (!previous) return true;
+  return (
+    current.left !== previous.left ||
+    current.right !== previous.right ||
+    current.up !== previous.up ||
+    current.down !== previous.down ||
+    current.action !== previous.action ||
+    current.sprint !== previous.sprint ||
+    current.tagQueued !== previous.tagQueued ||
+    current.yaw !== previous.yaw ||
+    current.pitch !== previous.pitch
+  );
+}
+
+function sendCurrentInput() {
+  if (STATE.mode !== "playing") return;
+  const wsClient = STATE.network.transport;
+  if (!wsClient) return;
+  if (STATE.network.liveNetworkState?.connected === false) return;
+
+  const inputState = buildNetworkInputState();
+  const snapshot = buildInputSnapshot(inputState);
+  if (!hasInputSnapshotChanged(snapshot, lastSentInputSnapshot)) return;
+
+  const actionQueued = snapshot.tagQueued;
+  const isDodgeball = STATE.matchConfig.mode === MATCH_MODES.dodgeball;
   const payload = {
     seq: ++STATE.network.inputSeq,
-    dtMs: Math.round(dt * 1000),
+    dtMs: 50,
     input: {
-      forward: input.forward,
-      back: input.back,
-      left: input.left,
-      right: input.right,
-      sprint: input.sprint,
-      jump: input.jumpQueued,
+      forward: inputState.up,
+      back: inputState.down,
+      left: inputState.left,
+      right: inputState.right,
+      sprint: snapshot.sprint,
+      jump: inputState.action,
       action: actionQueued,
       tag: !isDodgeball && actionQueued,
       throw: isDodgeball && actionQueued,
-      yaw: STATE.player.yaw,
-      pitch: STATE.player.pitch,
+      yaw: snapshot.yaw,
+      pitch: snapshot.pitch,
     },
   };
 
+  const command = cmdInput(payload);
+  const sent = wsClient.send(command.type, command.payload);
+  if (!sent) return;
+
+  lastSentInputSnapshot = snapshot;
   input.jumpQueued = false;
   input.tagQueued = false;
-  transport.sendInput(payload);
+}
+
+function startInputSender() {
+  if (inputSenderTimer) return;
+  inputSenderTimer = window.setInterval(() => {
+    sendCurrentInput();
+  }, 50);
+}
+
+function stopInputSender() {
+  if (!inputSenderTimer) return;
+  window.clearInterval(inputSenderTimer);
+  inputSenderTimer = null;
+  lastSentInputSnapshot = null;
 }
 
 function resetPlayerForMatch() {
@@ -1478,9 +1722,9 @@ function enterLobbyMode(showSummary = false) {
   uiPanel.style.display = "";
   hudEl.classList.add("hidden");
   if (showSummary) {
-    startBtn.textContent = STATE.network.useOnlineMode ? "Rejouer (serveur local)" : "Rejouer le match";
+    startBtn.textContent = STATE.network.useOnlineMode ? "Rejouer (LatteStream)" : "Rejouer le match";
   } else {
-    startBtn.textContent = STATE.network.useOnlineMode ? "Entrer (serveur local)" : "Entrer dans le Colisée";
+    startBtn.textContent = STATE.network.useOnlineMode ? "Entrer (LatteStream)" : "Entrer dans le Colisée";
   }
   if (matchSummaryEl) matchSummaryEl.classList.toggle("hidden", !showSummary || !STATE.lastMatchSummary);
   updateLobbyForm();
@@ -1653,8 +1897,19 @@ loadSessionFromStorage();
 initNetworkClient();
 updateLobbyForm();
 enterLobbyMode(false);
+startNetHudLoop();
+startInputSender();
+
+window.addEventListener("beforeunload", () => {
+  if (netHudTimer) {
+    window.clearInterval(netHudTimer);
+    netHudTimer = null;
+  }
+  stopInputSender();
+});
 
 function updateHud() {
+  updateNetworkDebugUi();
   const p = STATE.player;
   if (hudPlayerEl) hudPlayerEl.textContent = STATE.session.playerName;
   if (hudTeamEl) hudTeamEl.textContent = TEAM_LABELS[STATE.session.team];
@@ -2118,9 +2373,7 @@ function update(dt) {
   if (STATE.mode !== "playing") return;
 
   if (isNetworkOnline()) {
-    STATE.network.snapshotAgeMs = STATE.network.transport?.getSnapshotAgeMs() ?? null;
-    STATE.network.rttMs = STATE.network.transport?.rttMs ?? null;
-    updateNetworkInput(dt);
+    setSnapshotMetrics(STATE.network, STATE.network.transport);
     return;
   }
 
@@ -2343,7 +2596,14 @@ function render(nowMs = performance.now()) {
 
 let last = performance.now();
 let useDeterministicTime = false;
+let lastAppliedNetworkSnapshot = null;
 function animate(now) {
+  const liveSnapshot = STATE.network.liveNetworkState?.lastSnapshot || null;
+  if (liveSnapshot && liveSnapshot !== lastAppliedNetworkSnapshot) {
+    applySnapshot(liveSnapshot, STATE);
+    lastAppliedNetworkSnapshot = liveSnapshot;
+  }
+
   if (!useDeterministicTime) {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;

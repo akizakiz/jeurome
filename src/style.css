@@ -281,3 +281,89 @@ kbd {
 .hud-msg.show {
   opacity: 1;
 }
+
+.net-debug {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  margin: 0;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: rgba(18, 12, 9, 0.66);
+  border: 1px solid rgba(255, 214, 162, 0.2);
+  color: rgba(247, 239, 227, 0.92);
+  font-size: 12px;
+  line-height: 1.35;
+  max-width: min(520px, calc(100vw - 24px));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#net-hud {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 40;
+  min-width: min(420px, calc(100vw - 24px));
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(16, 12, 10, 0.72);
+  border: 1px solid rgba(255, 214, 162, 0.24);
+  color: rgba(247, 239, 227, 0.96);
+  font-size: 12px;
+  line-height: 1.35;
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+}
+
+.net-hud-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.net-hud-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 214, 162, 0.28);
+  background: rgba(134, 54, 39, 0.92);
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.net-hud-badge.connected {
+  background: rgba(55, 126, 78, 0.9);
+}
+
+.net-hud-debug {
+  margin: 2px 0 8px;
+  color: rgba(247, 239, 227, 0.82);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.net-hud-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.net-hud-actions button {
+  border: 1px solid rgba(255, 214, 162, 0.3);
+  border-radius: 9px;
+  background: rgba(41, 30, 24, 0.85);
+  color: rgba(247, 239, 227, 0.96);
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.net-hud-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
