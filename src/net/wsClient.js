@@ -2,7 +2,7 @@ import LatteStream from "@lattestream/client";
 import { MESSAGE_TYPES, PROTOCOL_VERSION } from "../network/protocol.js";
 
 const DEFAULT_PUBLIC_KEY =
-  "lspk_Z2w6NDVjZDE3ZWItODdlZS00NjI0LTk0MWMtZDljNzMyODI1YjRkOjk2MWFmZTdkLWI2NTgtNGJlMC1hMGEyLWEzOTMyM2FiNTNmOQ";
+  "lspk_ZXU6NDVjZDE3ZWItODdlZS00NjI0LTk0MWMtZDljNzMyODI1YjRkOmJlOTNiYTUyLTM2YWUtNDM0MS05ZGM0LTgxMzg1YzQwOGE2OA";
 const DEFAULT_WS_ENDPOINT = "eu1.lattestream.com";
 const DEFAULT_ROOM_ID = "module5-romeballon3";
 const PING_INTERVAL_MS = 2000;
