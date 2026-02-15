@@ -1065,41 +1065,7 @@ function updateRoomFlow(state, dt) {
     state.room.countdownLeftSec = 0;
     return;
   }
-
-  if (state.room.phase === "lobby" || state.room.phase === "postmatch") {
-    state.room.phase = "ready_check";
-    state.room.countdownLeftSec = 0;
-  }
-
-  const minReady = Math.min(state.room.minReadyPlayers, state.players.size);
-  const readyCount = countReadyPlayers(state);
-  const canStart = readyCount >= minReady && allPlayersReady(state);
-
-  if (state.room.phase === "ready_check") {
-    if (!canStart) return;
-    state.room.phase = "countdown";
-    state.room.countdownLeftSec = state.room.countdownDurationSec;
-    pushEvent(state, "countdown_start", {
-      countdownSec: state.room.countdownDurationSec,
-      readyCount,
-      players: state.players.size,
-    });
-    return;
-  }
-
-  if (state.room.phase === "countdown") {
-    if (!canStart) {
-      state.room.phase = "ready_check";
-      state.room.countdownLeftSec = 0;
-      pushEvent(state, "countdown_cancel", { reason: "not_ready" });
-      return;
-    }
-
-    state.room.countdownLeftSec = Math.max(0, state.room.countdownLeftSec - dt);
-    if (state.room.countdownLeftSec <= 0) {
-      startMatchInternal(state);
-    }
-  }
+  startMatchInternal(state);
 }
 
 function updatePlayers(state, dt) {
@@ -1333,11 +1299,7 @@ export function buildRoomState(state) {
 export function startMatch(state, rawConfig) {
   const configured = configureRoom(state, rawConfig);
   if (!configured.ok) return configured;
-  if (state.hostPlayerId) {
-    const host = state.players.get(state.hostPlayerId);
-    if (host) host.ready = true;
-  }
-  updateRoomFlow(state, 0);
+  startMatchInternal(state);
   return { ok: true };
 }
 

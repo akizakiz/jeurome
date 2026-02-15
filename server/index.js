@@ -262,6 +262,13 @@ async function handleJoin(body) {
     if (!started.ok) return { ok: false, code: 400, error: started.error || "Match impossible à démarrer." };
   }
 
+  // Auto-start the match immediately after a join when the room is not already playing.
+  if (room.state.mode !== "playing") {
+    const safeConfig = parsed.data.matchConfig ? sanitizeMatchConfig(parsed.data.matchConfig) : null;
+    const started = startMatch(room.state, safeConfig);
+    if (!started.ok) return { ok: false, code: 400, error: started.error || "Match impossible à démarrer." };
+  }
+
   const session = makeSession(playerId, roomId);
 
   const welcome = {

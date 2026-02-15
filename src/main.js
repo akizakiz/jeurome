@@ -7,7 +7,7 @@ import {
   normalizeTeam,
   sanitizePlayerName,
 } from "./network/protocol.js";
-import { cmdInput, cmdJoinRoom, cmdSetReady } from "./net/protocol.js";
+import { cmdInput, cmdJoinRoom } from "./net/protocol.js";
 import { applySnapshot } from "./net/snapshotApplier.js";
 import { createNetworkState, initNetwork, setNetworkStatus, setRoomFlags, setSnapshotMetrics } from "./state/networkState.js";
 
@@ -769,18 +769,14 @@ function updateRoomUi() {
   updateNetworkDebugUi();
   if (!readyBtn || !roomStateEl) return;
 
-  readyBtn.classList.toggle("hidden", !isOnline || !STATE.network.joinedRoom);
+  // No ready gate in online mode: joining a room should be enough to start playing.
+  readyBtn.classList.add("hidden");
   roomStateEl.classList.toggle("hidden", !isOnline);
-
-  const canToggleReady = STATE.room.phase === "ready_check" || STATE.room.phase === "countdown";
-  readyBtn.disabled = !canToggleReady;
-  readyBtn.textContent = STATE.network.isReady ? "Annuler prêt" : "Je suis prêt";
-  readyBtn.classList.toggle("not-ready", STATE.network.isReady);
 
   const phaseLabel = formatRoomPhaseLabel(STATE.room.phase);
   const countdown =
     STATE.room.phase === "countdown" ? ` · Démarrage ${Math.max(0, Math.ceil(STATE.room.countdownLeftSec))}s` : "";
-  const base = `${phaseLabel} · ${STATE.room.readyCount}/${STATE.room.totalPlayers} prêts`;
+  const base = `${phaseLabel} · ${STATE.room.totalPlayers} joueurs`;
   const host = STATE.room.hostPlayerId === STATE.network.playerId ? " · Hôte" : "";
   roomStateEl.textContent = `${base}${countdown}${host}`;
 }
@@ -893,11 +889,14 @@ function updateNetHudOverlay() {
   if (netHudUi.lastTick) netHudUi.lastTick.textContent = String(lastTick);
   if (netHudUi.telemetry) netHudUi.telemetry.textContent = `typesSeen: ${typesText} · counts: ${countsText} · sent: ${sentText}`;
   if (netHudUi.readyBtn) {
+    netHudUi.readyBtn.classList.add("hidden");
     netHudUi.readyBtn.textContent = readyState ? "Ready: ON" : "Ready: OFF";
-    netHudUi.readyBtn.disabled = !connected || !STATE.network.joinedRoom;
+    netHudUi.readyBtn.disabled = true;
   }
   if (netHudUi.joinBtn) {
-    netHudUi.joinBtn.disabled = !connected;
+    const canJoin = connected && !STATE.network.joinedRoom;
+    netHudUi.joinBtn.classList.toggle("hidden", !canJoin);
+    netHudUi.joinBtn.disabled = !canJoin;
   }
 }
 
@@ -945,22 +944,7 @@ function onNetHudJoinClick() {
 }
 
 function onNetHudReadyClick() {
-  if (!isNetworkOnline()) {
-    setStatus("Serveur non connecté.");
-    return;
-  }
-  if (!STATE.network.transport || !STATE.network.joinedRoom) return;
-
-  const nextReady = !getCurrentReadyState();
-  const sent = sendNetworkCommand(cmdSetReady(nextReady));
-  if (!sent) {
-    setStatus("Impossible d'envoyer Ready.");
-    return;
-  }
-
-  STATE.network.isReady = nextReady;
-  updateRoomUi();
-  updateNetHudOverlay();
+  // Ready is intentionally disabled: the match starts automatically once joined.
 }
 
 function startNetHudLoop() {
@@ -1477,7 +1461,21 @@ function initNetworkClient() {
         setStatus("Connexion au réseau LatteStream…");
       } else if (status === "online") {
         STATE.network.lastNetworkError = "";
-        setStatus("Réseau connecté. Entre dans la room puis mets-toi prêt.");
+        setStatus("Réseau connecté. Connexion à la room…");
+        if (!STATE.network.joinedRoom) {
+          const parsed = parseLobbySettings();
+          if (parsed.ok) {
+            STATE.session.playerName = parsed.data.playerName;
+            STATE.session.team = parsed.data.team;
+            STATE.matchConfig.mode = parsed.data.mode;
+            STATE.matchConfig.botCount = parsed.data.botCount;
+            STATE.matchConfig.durationSec = parsed.data.durationSec;
+            saveSessionToStorage();
+            requestNetworkMatch(parsed.data);
+          } else {
+            setStatus(parsed.message);
+          }
+        }
       } else if (STATE.network.useOnlineMode) {
         setRoomFlags(STATE.network, { joinedRoom: false, isReady: false });
         if (STATE.mode === "playing") {
@@ -1562,7 +1560,7 @@ function requestNetworkMatch(settings) {
     requestStart: false,
   });
   STATE.network.startedViaNetwork = true;
-  setStatus("Room mise à jour. Clique sur 'Je suis prêt'.");
+  setStatus("Connexion à la room en cours…");
   return true;
 }
 
@@ -1862,20 +1860,7 @@ startBtn.addEventListener("click", async () => {
   startMatch();
 });
 
-readyBtn?.addEventListener("click", () => {
-  if (!isNetworkOnline()) return;
-  if (!STATE.network.transport || !STATE.network.joinedRoom) return;
-
-  const nextReady = !STATE.network.isReady;
-  const sent = STATE.network.transport.sendRoomReady(nextReady);
-  if (!sent) {
-    setStatus("Impossible d'envoyer le statut prêt.");
-    return;
-  }
-
-  STATE.network.isReady = nextReady;
-  updateRoomUi();
-});
+readyBtn?.classList.add("hidden");
 
 for (const btn of teamButtons) {
   btn.addEventListener("click", () => {
